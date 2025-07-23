@@ -1,161 +1,247 @@
+import streamlit as st
 import os
 from dotenv import load_dotenv
 import time
 import requests
 import csv
-from io import StringIO
+from io import StringIO, BytesIO
+import pandas as pd
+import gzip # For GZIP decompression
 
 from sp_api.api import Reports
 from sp_api.base import Marketplaces, Client
-
-# --- Load Environment Variables ---
-load_dotenv()
-
-# --- SP-API Credentials ---
-credentials = {
-    'lwa_app_id': os.getenv('SPAPI_CLIENT_ID'),
-    'lwa_client_secret': os.getenv('SPAPI_CLIENT_SECRET'),
-    'aws_access_key': os.getenv('AWS_ACCESS_KEY_ID'),
-    'aws_secret_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
-    'lwa_refresh_token': os.getenv('SPAPI_REFRESH_TOKEN')
-}
-
-MARKETPLACE_ID = os.getenv('MARKETPLACE_ID') # e.g., ATVPDKIKX0DER for US
+from sp_api.base.exceptions import SellingApiException # Import for specific error handling
 
 # --- Configuration ---
-REPORT_TYPE = 'GET_FLAT_FILE_OPEN_LISTINGS_DATA'
-POLL_INTERVAL_SECONDS = 30
-MAX_POLL_ATTEMPTS = 60
+REPORT_TYPE = 'GET_FLAT_FILE_OPEN_LISTINGS_DATA' # Report type for all active listings
+POLL_INTERVAL_SECONDS = 10 # How often to check report status (can be increased for production)
+MAX_POLL_ATTEMPTS = 120 # Max attempts (e.g., 20 minutes total wait for 10-sec interval)
 
-def get_listing_report(marketplace_id_string: str, report_type: str = REPORT_TYPE):
+# --- Load Environment Variables (Credentials) ---
+# This function loads credentials once and caches them for efficiency.
+@st.cache_resource
+def load_credentials():
+    load_dotenv()
+    creds = {
+        'lwa_app_id': os.getenv('SPAPI_CLIENT_ID'),
+        'lwa_client_secret': os.getenv('SPAPI_CLIENT_SECRET'),
+        'aws_access_key': os.getenv('AWS_ACCESS_KEY_ID'),
+        'aws_secret_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
+        'lwa_refresh_token': os.getenv('SPAPI_REFRESH_TOKEN')
+    }
+    # Basic validation for essential credentials
+    if not all([creds['lwa_app_id'], creds['lwa_client_secret'], creds['lwa_refresh_token'],
+                creds['aws_access_key'], creds['aws_secret_key']]):
+        st.error("Missing one or more SP-API credentials in your .env file. Please check SPAPI_CLIENT_ID, SPAPI_CLIENT_SECRET, SPAPI_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.")
+        st.stop() # Stop execution if credentials are not found
+    return creds
+
+# --- Helper function to map marketplace ID string to Marketplaces enum ---
+def get_marketplace_enum(marketplace_id_string: str):
+    for marketplace in Marketplaces:
+        if marketplace.marketplace_id == marketplace_id_string:
+            return marketplace
+    return None
+
+# --- Main function to get the listing report ---
+@st.cache_data(show_spinner=False) # Cache data, but control spinner manually
+def get_listing_report(marketplace_id_string: str, credentials: dict, report_type: str = REPORT_TYPE):
     """
     Requests, monitors, and downloads a specific listing report from Amazon SP-API.
-    Dynamically selects the Marketplace enum based on the provided marketplace ID string.
+    Returns a pandas DataFrame or None if an error occurs.
     """
+    marketplace_enum = get_marketplace_enum(marketplace_id_string)
+    if not marketplace_enum:
+        st.error(f"Unsupported Marketplace ID: {marketplace_id_string}. Please ensure it's a valid Amazon marketplace ID supported by the SDK.")
+        return None
+
     try:
-        # Dynamically find the Marketplace enum member
-        marketplace_enum = None
-        for marketplace in Marketplaces:
-            if marketplace.marketplace_id == marketplace_id_string:
-                marketplace_enum = marketplace
-                break
-
-        if not marketplace_enum:
-            print(f"Error: Could not find Marketplace enum for ID: {marketplace_id_string}")
-            print("Please ensure the MARKETPLACE_ID in your .env is correct and supported by the SDK.")
-            return None
-
         # Initialize the Reports API client
         reports_client = Reports(
-            marketplace=marketplace_enum, # Use the dynamically determined enum
+            marketplace=marketplace_enum,
             refresh_token=credentials['lwa_refresh_token'],
             credentials=credentials
         )
 
-        print(f"Requesting report type: {report_type} for marketplace: {marketplace_id_string} ({marketplace_enum.name})...")
+        st.info(f"Requesting report type: `{report_type}` for marketplace: `{marketplace_id_string}` (`{marketplace_enum.name}`). This may take a few minutes...")
 
         # 1. Request the report
-        create_report_response = reports_client.create_report(
-            reportType=report_type,
-            marketplaceIds=[marketplace_id_string]
-            # dataStartTime='YYYY-MM-DDTHH:MM:SSZ', # Optional: for historical data
-            # dataEndTime='YYYY-MM:SSZ',   # Optional
-        )
-        report_id = create_report_response.payload.get('reportId')
+        with st.spinner("Initiating report request..."):
+            create_report_response = reports_client.create_report(
+                reportType=report_type,
+                marketplaceIds=[marketplace_id_string]
+            )
+            report_id = create_report_response.payload.get('reportId')
 
         if not report_id:
-            print(f"Error: Could not obtain reportId from create_report response: {create_report_response.payload}")
+            st.error(f"Error: Could not obtain reportId from create_report response: {create_report_response.payload}")
             return None
 
-        print(f"Report requested. reportId: {report_id}. Polling for completion...")
+        st.info(f"Report requested. Report ID: `{report_id}`. Polling for completion...")
 
         # 2. Monitor Report Processing
         report_document_id = None
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
         for attempt in range(MAX_POLL_ATTEMPTS):
             time.sleep(POLL_INTERVAL_SECONDS)
-            print(f"Polling report status (Attempt {attempt + 1}/{MAX_POLL_ATTEMPTS})...")
+            progress = (attempt + 1) / MAX_POLL_ATTEMPTS
+            progress_bar.progress(progress)
 
             get_report_response = reports_client.get_report(reportId=report_id)
             processing_status = get_report_response.payload.get('processingStatus')
+            status_text.text(f"Report status: {processing_status} (Attempt {attempt + 1}/{MAX_POLL_ATTEMPTS})")
 
             if processing_status == 'DONE':
                 report_document_id = get_report_response.payload.get('reportDocumentId')
-                print(f"Report processing complete! reportDocumentId: {report_document_id}")
+                st.success(f"Report processing complete! Report Document ID: `{report_document_id}`")
                 break
             elif processing_status in ['FATAL', 'CANCELLED']:
-                print(f"Report processing failed with status: {processing_status}")
-                print(f"Report details: {get_report_response.payload}")
+                st.error(f"Report processing failed with status: {processing_status}")
+                st.json(get_report_response.payload) # Show full payload for debugging
                 return None
             else:
-                print(f"Report still {processing_status}...")
+                pass # Continue polling
 
         if not report_document_id:
-            print("Report did not complete in time or failed.")
+            st.warning("Report did not complete in time or failed to retrieve document ID.")
             return None
 
         # 3. Retrieve Report Document
-        print(f"Retrieving report document for {report_document_id}...")
-        get_report_doc_response = reports_client.get_report_document(
-            reportDocumentId=report_document_id
-        )
+        with st.spinner(f"Retrieving report document for `{report_document_id}`..."):
+            get_report_doc_response = reports_client.get_report_document(
+                reportDocumentId=report_document_id
+            )
 
         download_url = get_report_doc_response.payload.get('url')
         compression_algorithm = get_report_doc_response.payload.get('compressionAlgorithm')
 
         if not download_url:
-            print(f"Error: Could not get download URL for report document: {get_report_doc_response.payload}")
+            st.error(f"Error: Could not get download URL for report document: {get_report_doc_response.payload}")
             return None
 
-        print(f"Downloading report from: {download_url}")
+        st.info(f"Downloading report from Amazon...")
 
         # 4. Download the Report
-        report_content = requests.get(download_url).content
+        with st.spinner("Downloading report content..."):
+            report_content_bytes = requests.get(download_url).content
 
-        # Handle decompression if necessary
+        # Handle decompression
         if compression_algorithm == 'GZIP':
-            import gzip
-            report_content = gzip.decompress(report_content)
+            st.info("Decompressing GZIP content...")
+            report_content_bytes = gzip.decompress(report_content_bytes)
         elif compression_algorithm == 'ZLIB':
             import zlib
-            report_content = zlib.decompress(report_content)
-        # Add other compression algorithms if needed
+            st.info("Decompressing ZLIB content...")
+            report_content_bytes = zlib.decompress(report_content_bytes)
+        # Add other compression algorithms if needed, or default to raw bytes
 
-        report_text = report_content.decode('utf-8')
+        report_text = report_content_bytes.decode('utf-8') # Assuming UTF-8, adjust if needed
 
-        # 5. Process the Report (Example: print first few lines and parse as CSV)
-        print("\n--- Report Content Preview (First 10 lines) ---")
-        lines = report_text.splitlines()
-        for i, line in enumerate(lines[:10]):
-            print(line)
-        if len(lines) > 10:
-            print(f"... (total {len(lines)} lines)")
+        # 5. Process the Report into a DataFrame
+        if not report_text.strip():
+            st.warning("Downloaded report is empty.")
+            return pd.DataFrame() # Return empty DataFrame
 
-        print("\n--- Parsing Report Data (Example: CSV reader) ---")
-        reader = csv.reader(StringIO(report_text), delimiter='\t')
-        header = next(reader)
-        print(f"Report Header: {header}")
+        # Use StringIO to treat the string content as a file for pandas
+        # Most Amazon flat files are tab-delimited (TSV)
+        df = pd.read_csv(StringIO(report_text), sep='\t', quoting=csv.QUOTE_NONE, encoding='utf-8', on_bad_lines='warn')
 
-        parsed_data = []
-        for row in reader:
-            parsed_data.append(row)
+        st.success(f"Successfully extracted {len(df)} listing entries.")
+        return df
 
-        print(f"\nSuccessfully parsed {len(parsed_data)} data rows.")
-        return parsed_data
-
+    except SellingApiException as se:
+        st.error(f"SP-API Error: {se.code} - {se.message}")
+        if se.details:
+            st.json(se.details)
+        return None
+    except requests.exceptions.RequestException as re:
+        st.error(f"Network or Request Error: {re}")
+        return None
     except Exception as e:
-        print(f"An error occurred during report extraction: {e}")
+        st.error(f"An unexpected error occurred: {e}")
         return None
 
-if __name__ == "__main__":
-    if not all([credentials.get('lwa_app_id'), credentials.get('lwa_client_secret'),
-                credentials.get('lwa_refresh_token'), credentials.get('aws_access_key'),
-                credentials.get('aws_secret_key'), MARKETPLACE_ID]):
-        print("Please ensure all SP-API credentials (LWA, AWS IAM) and MARKETPLACE_ID are set in your .env file.")
-    else:
-        print(f"Starting report extraction for Marketplace ID: {MARKETPLACE_ID}")
-        all_listings_data = get_listing_report(MARKETPLACE_ID, REPORT_TYPE)
+# --- Streamlit App Layout ---
+st.set_page_config(layout="wide", page_title="Amazon SP-API Listing Report")
 
-        if all_listings_data:
-            print(f"Extracted {len(all_listings_data)} listing entries.")
-        else:
-            print("Failed to extract listing report.")
+st.title("📦 Amazon SP-API Listing Report Generator")
+st.markdown("Select a marketplace and generate a comprehensive listing report.")
+
+# Load credentials at the start (cached)
+spapi_credentials = load_credentials()
+
+# Get available marketplaces from the SDK's Marketplaces enum
+# Create a dictionary for display: {"US (ATVPDKIKX0DER)": "ATVPDKIKX0DER", ...}
+marketplace_options = {f"{m.name} ({m.marketplace_id})": m.marketplace_id for m in Marketplaces}
+sorted_marketplace_options_keys = sorted(marketplace_options.keys())
+
+# User selects marketplace
+selected_marketplace_display = st.selectbox(
+    "Select Marketplace:",
+    options=sorted_marketplace_options_keys,
+    index=sorted_marketplace_options_keys.index(f"US ({Marketplaces.US.marketplace_id})") if f"US ({Marketplaces.US.marketplace_id})" in sorted_marketplace_options_keys else 0,
+    help="Choose the Amazon marketplace for which you want to retrieve the report."
+)
+selected_marketplace_id = marketplace_options[selected_marketplace_display]
+
+st.write(f"Selected Marketplace ID: `{selected_marketplace_id}`")
+
+# Button to trigger report generation
+if st.button("Generate Listing Report", help="Click to request and download the 'Open Listings' report."):
+    if spapi_credentials: # Only proceed if credentials were loaded successfully
+        with st.status("Generating report...", expanded=True) as status:
+            df_report = get_listing_report(selected_marketplace_id, spapi_credentials)
+            if df_report is not None:
+                st.session_state['listing_report_df'] = df_report
+                status.update(label="Report Generation Complete!", state="complete", expanded=False)
+            else:
+                st.session_state['listing_report_df'] = None
+                status.update(label="Report Generation Failed", state="error", expanded=False)
+    else:
+        st.error("Cannot generate report: SP-API credentials are not loaded.")
+
+# Display report data if available in session state
+if 'listing_report_df' in st.session_state and st.session_state['listing_report_df'] is not None:
+    st.subheader(f"Listing Report for {selected_marketplace_display}")
+
+    if not st.session_state['listing_report_df'].empty:
+        # Display the DataFrame in a scrollable table
+        st.dataframe(st.session_state['listing_report_df'], use_container_width=True, height=500) # Height for scrollability
+
+        # Provide download button
+        csv_buffer = BytesIO()
+        st.session_state['listing_report_df'].to_csv(csv_buffer, index=False, encoding='utf-8')
+        csv_buffer.seek(0) # Rewind the buffer to the beginning
+
+        st.download_button(
+            label="Download Report as CSV",
+            data=csv_buffer,
+            file_name=f"amazon_listings_report_{selected_marketplace_id}_{time.strftime('%Y%m%d-%H%M%S')}.csv",
+            mime="text/csv",
+            help="Download the displayed report data as a CSV file."
+        )
+    else:
+        st.info("No listing data found for the selected marketplace.")
+elif 'listing_report_df' in st.session_state and st.session_state['listing_report_df'] is None:
+    st.info("Report generation was attempted but failed or returned no data. Check error messages above.")
+
+st.markdown("---")
+st.markdown("### How to Run This Application:")
+st.markdown("1.  **Save the code:** Save the code above as `app.py` (or any `.py` file).")
+st.markdown("2.  **Create `.env`:** In the same directory, create a file named `.env` and populate it with your actual SP-API credentials (Client ID, Client Secret, Refresh Token, AWS Access Key ID, AWS Secret Access Key).")
+st.code("""
+SPAPI_CLIENT_ID="amzn1.developer.LWA-XXXX"
+SPAPI_CLIENT_SECRET="amzn1.developer.LWA-secret-XXXX"
+SPAPI_REFRESH_TOKEN="Atzr|RQFN-XXXX"
+SELLER_ID="A123ABCDEFGH" # Your Amazon Seller ID (not directly used in this report, but good to have)
+MARKETPLACE_ID="ATVPDKIKX0DER" # Example: US marketplace ID (used as default selection)
+AWS_ACCESS_KEY_ID="YOUR_AWS_ACCESS_KEY_ID" # Required for SigV4 signing
+AWS_SECRET_ACCESS_KEY="YOUR_AWS_SECRET_ACCESS_KEY" # Required for SigV4 signing
+""")
+st.markdown("3.  **Install libraries:** Open your terminal/command prompt, navigate to the directory, activate your virtual environment (if using), and run:")
+st.code("pip install streamlit python-dotenv requests pandas python-amazon-sp-api")
+st.markdown("4.  **Run the Streamlit app:**")
+st.code("streamlit run app.py")
+st.markdown("5.  **Access in browser:** Streamlit will open a new tab in your web browser with the application.")
