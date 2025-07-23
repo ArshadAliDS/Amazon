@@ -1,0 +1,5 @@
+streamlit
+python-dotenv
+requests
+pandas
+python-amazon-sp-api
