@@ -227,30 +227,32 @@ def get_product_details(sku, marketplace_id, seller_id, selected_country_name):
 # --- Streamlit User Interface (UI) ---
 st.set_page_config(page_title="Amazon Product Details Extractor", layout="wide")
 
-# Custom CSS for styling
+# MODIFIED: CSS now uses Streamlit's theme variables and only styles specific elements
+# to avoid conflicts with light/dark mode.
 st.markdown("""
 <style>
-    .stApp { background: #f0f2f6; color: #333; }
-    .stButton>button { background-color: #FF9900; color: white; border-radius: 8px; border: none; padding: 10px 20px; font-weight: bold; }
-    .stButton>button:hover { background-color: #e68a00; }
-    h1, h2, h3 { color: #2c3e50; font-family: 'Inter', sans-serif; }
-    .main-header { text-align: center; padding-bottom: 20px; border-bottom: 2px solid #e0e0e0; margin-bottom: 30px; }
+    /* Style the orange button */
+    .stButton>button { 
+        background-color: #FF9900; 
+        color: white; 
+        border-radius: 8px; 
+        border: none; 
+        padding: 10px 20px; 
+        font-weight: bold; 
+    }
+    .stButton>button:hover { 
+        background-color: #e68a00; 
+    }
 
-    /* MODIFIED: Explicitly style all inputs and selectbox for visibility on light background */
-    .stTextInput input, .stSelectbox div[data-baseweb="select"] {
-        background-color: #FFFFFF !important;
-        border: 1px solid #CCCCCC !important;
-        border-radius: 8px;
-    }
-    .stTextInput input {
-        color: #000000 !important;
-    }
-    .stTextInput label, .stSelectbox label {
-        color: #2c3e50 !important; /* Ensure labels are visible */
-        font-weight: bold;
+    /* Set a standard header style that works on both themes */
+    .main-header { 
+        text-align: center; 
+        padding-bottom: 20px; 
+        border-bottom: 2px solid var(--secondary-background-color); 
+        margin-bottom: 30px; 
     }
     
-    /* Style for the results text areas to have a dark theme */
+    /* Style for the results text areas to have a dark theme, works in both modes */
     .stTextArea textarea {
         background-color: #212529;
         color: #f8f9fa;
@@ -267,8 +269,13 @@ if 'authenticated' not in st.session_state:
 
 # Password authentication
 if not st.session_state['authenticated']:
-    st.markdown("<h2 style='text-align: center; color: #2c3e50;'>Access Product Extractor</h2>", unsafe_allow_html=True)
-    password_input = st.text_input("Enter Password:", type="password", key="password_input", help="Enter the password from your .env file.")
+    st.markdown("<h2 style='text-align: center;'>Access Product Extractor</h2>", unsafe_allow_html=True)
+    password_input = st.text_input(
+        "Enter Password:", 
+        type="password", 
+        key="password_input", 
+        help="Enter the password from your .env file."
+    )
     
     if password_input:
         if password_input == APP_PASSWORD:
@@ -308,7 +315,7 @@ Password="your_secure_password"
         ```
         """, unsafe_allow_html=True)
     
-    # Use a container with a border for better visual grouping
+    # Use a container with a border for better visual grouping (border color is theme-aware)
     with st.container(border=True):
         st.header("Retrieve Product Details by SKU")
 
