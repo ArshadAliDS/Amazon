@@ -7,13 +7,34 @@ import csv
 from io import StringIO, BytesIO
 import pandas as pd
 import gzip # For GZIP decompression
+import zlib # For ZLIB decompression
 
 from sp_api.api import Reports
 from sp_api.base import Marketplaces, Client
 from sp_api.base.exceptions import SellingApiException # Import for specific error handling
 
 # --- Configuration ---
-REPORT_TYPE = 'GET_FLAT_FILE_OPEN_LISTINGS_DATA' # Report type for all active listings
+# Mapping of user-friendly report names to SP-API report types
+REPORT_TYPES_MAP = {
+    "All Active Listings (Flat File)": 'GET_FLAT_FILE_OPEN_LISTINGS_DATA',
+    "All Listings (Flat File)": 'GET_MERCHANT_LISTINGS_ALL_DATA',
+    "Inventory (Flat File)": 'GET_FLAT_FILE_ALL_INVENTORY_DATA',
+    "Sales and Traffic (ASIN)": 'GET_SALES_AND_TRAFFIC_REPORT', # Example, might require specific parameters or a different API
+    "Settlement Report (V2 Flat File)": 'GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2',
+    "Seller Feedback": 'GET_SELLER_FEEDBACK_DATA',
+    "FBA Fulfilled Inventory": 'GET_FBA_FULFILLMENT_CURRENT_INVENTORY_DATA',
+    "FBA Daily Inventory History": 'GET_FBA_FULFILLMENT_INVENTORY_ARCHIVE_DATA',
+    "FBA Customer Returns": 'GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA',
+    "FBA Reimbursements": 'GET_FBA_REIMBURSEMENTS_DATA',
+    "Reserved Inventory": 'GET_RESERVED_INVENTORY_REPORT',
+    "Manage FBA Inventory": 'GET_AFN_INVENTORY_DATA',
+    "Open Orders (Flat File)": 'GET_FLAT_FILE_ACTIONABLE_ORDER_DATA',
+    "Canceled Orders (Flat File)": 'GET_FLAT_FILE_ORDER_REPORT_DATA_SHIPPING', # This is a general order report, specific canceled might need filtering
+    "Pending Orders (Flat File)": 'GET_FLAT_FILE_PENDING_ORDERS_DATA',
+    "Returns (Flat File)": 'GET_FLAT_FILE_RETURNS_REPORT_BY_RETURN_DATE',
+    # Add more report types as needed from Amazon SP-API documentation
+}
+
 POLL_INTERVAL_SECONDS = 10 # How often to check report status (can be increased for production)
 MAX_POLL_ATTEMPTS = 120 # Max attempts (e.g., 20 minutes total wait for 10-sec interval)
 
@@ -31,23 +52,24 @@ def load_credentials():
     }
     # Basic validation for essential credentials
     if not all([creds['lwa_app_id'], creds['lwa_client_secret'], creds['lwa_refresh_token'],
-                creds['aws_access_key'], creds['aws_secret_key']]):
+                 creds['aws_access_key'], creds['aws_secret_key']]):
         st.error("Missing one or more SP-API credentials in your .env file. Please check SPAPI_CLIENT_ID, SPAPI_CLIENT_SECRET, SPAPI_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.")
         st.stop() # Stop execution if credentials are not found
     return creds
 
 # --- Helper function to map marketplace ID string to Marketplaces enum ---
 def get_marketplace_enum(marketplace_id_string: str):
+    """Converts a marketplace ID string to its corresponding Marketplaces enum."""
     for marketplace in Marketplaces:
         if marketplace.marketplace_id == marketplace_id_string:
             return marketplace
     return None
 
-# --- Main function to get the listing report ---
+# --- Main function to get the Amazon report ---
 @st.cache_data(show_spinner=False) # Cache data, but control spinner manually
-def get_listing_report(marketplace_id_string: str, credentials: dict, report_type: str = REPORT_TYPE):
+def get_amazon_report(marketplace_id_string: str, credentials: dict, report_type_api_name: str):
     """
-    Requests, monitors, and downloads a specific listing report from Amazon SP-API.
+    Requests, monitors, and downloads a specific report from Amazon SP-API.
     Returns a pandas DataFrame or None if an error occurs.
     """
     marketplace_enum = get_marketplace_enum(marketplace_id_string)
@@ -63,12 +85,12 @@ def get_listing_report(marketplace_id_string: str, credentials: dict, report_typ
             credentials=credentials
         )
 
-        st.info(f"Requesting report type: `{report_type}` for marketplace: `{marketplace_id_string}` (`{marketplace_enum.name}`). This may take a few minutes...")
+        st.info(f"Requesting report type: `{report_type_api_name}` for marketplace: `{marketplace_id_string}` (`{marketplace_enum.name}`). This may take a few minutes...")
 
         # 1. Request the report
         with st.spinner("Initiating report request..."):
             create_report_response = reports_client.create_report(
-                reportType=report_type,
+                reportType=report_type_api_name,
                 marketplaceIds=[marketplace_id_string]
             )
             report_id = create_report_response.payload.get('reportId')
@@ -132,12 +154,16 @@ def get_listing_report(marketplace_id_string: str, credentials: dict, report_typ
             st.info("Decompressing GZIP content...")
             report_content_bytes = gzip.decompress(report_content_bytes)
         elif compression_algorithm == 'ZLIB':
-            import zlib
             st.info("Decompressing ZLIB content...")
             report_content_bytes = zlib.decompress(report_content_bytes)
         # Add other compression algorithms if needed, or default to raw bytes
 
-        report_text = report_content_bytes.decode('utf-8') # Assuming UTF-8, adjust if needed
+        # Attempt to decode, handling potential errors
+        try:
+            report_text = report_content_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            st.warning("UTF-8 decoding failed, trying 'latin-1' (common for some Amazon reports).")
+            report_text = report_content_bytes.decode('latin-1') # Fallback for other encodings
 
         # 5. Process the Report into a DataFrame
         if not report_text.strip():
@@ -148,7 +174,7 @@ def get_listing_report(marketplace_id_string: str, credentials: dict, report_typ
         # Most Amazon flat files are tab-delimited (TSV)
         df = pd.read_csv(StringIO(report_text), sep='\t', quoting=csv.QUOTE_NONE, encoding='utf-8', on_bad_lines='warn')
 
-        st.success(f"Successfully extracted {len(df)} listing entries.")
+        st.success(f"Successfully extracted {len(df)} entries for report type: `{report_type_api_name}`.")
         return df
 
     except SellingApiException as se:
@@ -164,10 +190,10 @@ def get_listing_report(marketplace_id_string: str, credentials: dict, report_typ
         return None
 
 # --- Streamlit App Layout ---
-st.set_page_config(layout="wide", page_title="Amazon SP-API Listing Report")
+st.set_page_config(layout="wide", page_title="Amazon SP-API Report Generator")
 
-st.title("📦 Amazon SP-API Listing Report Generator")
-st.markdown("Select a marketplace and generate a comprehensive listing report.")
+st.title("📦 Amazon SP-API Dynamic Report Generator")
+st.markdown("Select a marketplace and a report type to generate and view the data.")
 
 # Load credentials at the start (cached)
 spapi_credentials = load_credentials()
@@ -188,43 +214,68 @@ selected_marketplace_id = marketplace_options[selected_marketplace_display]
 
 st.write(f"Selected Marketplace ID: `{selected_marketplace_id}`")
 
+# User selects report type
+selected_report_display_name = st.selectbox(
+    "Select Report Type:",
+    options=list(REPORT_TYPES_MAP.keys()),
+    index=list(REPORT_TYPES_MAP.keys()).index("All Active Listings (Flat File)"), # Default selection
+    help="Choose the type of report you want to generate."
+)
+selected_report_api_name = REPORT_TYPES_MAP[selected_report_display_name]
+
+st.write(f"Selected SP-API Report Type: `{selected_report_api_name}`")
+
+
 # Button to trigger report generation
-if st.button("Generate Listing Report", help="Click to request and download the 'Open Listings' report."):
+if st.button("Generate Report", help=f"Click to request and download the '{selected_report_display_name}' report."):
     if spapi_credentials: # Only proceed if credentials were loaded successfully
-        with st.status("Generating report...", expanded=True) as status:
-            df_report = get_listing_report(selected_marketplace_id, spapi_credentials)
+        with st.status(f"Generating '{selected_report_display_name}' report...", expanded=True) as status:
+            # Pass the selected API report name to the function
+            df_report = get_amazon_report(selected_marketplace_id, spapi_credentials, selected_report_api_name)
             if df_report is not None:
-                st.session_state['listing_report_df'] = df_report
+                st.session_state['current_report_df'] = df_report
+                st.session_state['current_report_name'] = selected_report_display_name
+                st.session_state['current_report_api_name'] = selected_report_api_name
                 status.update(label="Report Generation Complete!", state="complete", expanded=False)
             else:
-                st.session_state['listing_report_df'] = None
+                st.session_state['current_report_df'] = None
+                st.session_state['current_report_name'] = None
+                st.session_state['current_report_api_name'] = None
                 status.update(label="Report Generation Failed", state="error", expanded=False)
     else:
         st.error("Cannot generate report: SP-API credentials are not loaded.")
 
 # Display report data if available in session state
-if 'listing_report_df' in st.session_state and st.session_state['listing_report_df'] is not None:
-    st.subheader(f"Listing Report for {selected_marketplace_display}")
+if 'current_report_df' in st.session_state and st.session_state['current_report_df'] is not None:
+    report_display_name = st.session_state.get('current_report_name', "Generated Report")
+    report_api_name = st.session_state.get('current_report_api_name', "UNKNOWN_REPORT_TYPE")
 
-    if not st.session_state['listing_report_df'].empty:
+    st.subheader(f"{report_display_name} for {selected_marketplace_display}")
+
+    if not st.session_state['current_report_df'].empty:
         # Display the DataFrame in a scrollable table
-        st.dataframe(st.session_state['listing_report_df'], use_container_width=True, height=500) # Height for scrollability
+        st.dataframe(st.session_state['current_report_df'], use_container_width=True, height=500) # Height for scrollability
 
         # Provide download button
         csv_buffer = BytesIO()
-        st.session_state['listing_report_df'].to_csv(csv_buffer, index=False, encoding='utf-8')
+        # Use a more robust encoding for CSV download if UTF-8 causes issues with specific reports
+        st.session_state['current_report_df'].to_csv(csv_buffer, index=False, encoding='utf-8')
         csv_buffer.seek(0) # Rewind the buffer to the beginning
+
+        # Create a clean file name from the report display name
+        safe_report_name = report_display_name.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").lower()
+        file_name = f"amazon_{safe_report_name}_{selected_marketplace_id}_{time.strftime('%Y%m%d-%H%M%S')}.csv"
 
         st.download_button(
             label="Download Report as CSV",
             data=csv_buffer,
-            file_name=f"amazon_listings_report_{selected_marketplace_id}_{time.strftime('%Y%m%d-%H%M%S')}.csv",
+            file_name=file_name,
             mime="text/csv",
             help="Download the displayed report data as a CSV file."
         )
     else:
-        st.info("No listing data found for the selected marketplace.")
-elif 'listing_report_df' in st.session_state and st.session_state['listing_report_df'] is None:
+        st.info(f"No data found for the selected '{report_display_name}' report for {selected_marketplace_display}.")
+elif 'current_report_df' in st.session_state and st.session_state['current_report_df'] is None:
     st.info("Report generation was attempted but failed or returned no data. Check error messages above.")
 
 st.markdown("---")
