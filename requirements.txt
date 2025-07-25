@@ -3,3 +3,5 @@ python-dotenv
 requests
 pandas
 python-amazon-sp-api
+json
+os
