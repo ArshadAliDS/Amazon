@@ -267,7 +267,7 @@ else:
         
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
-            selected_account = st.selectbox("Select Account:", options=["Frienemy", "aport"])
+            selected_account = st.selectbox("Select Account:", options=["Frienemy", "Aport"])
         with col2:
             selected_country_name = st.selectbox("Select Country/Marketplace:", options=list(MARKETPLACE_DETAILS_MAP.keys()), index=0)
         with col3:
