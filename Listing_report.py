@@ -40,24 +40,28 @@ MAX_POLL_ATTEMPTS = 120
 load_dotenv()
 APP_PASSWORD = os.getenv("Password")
 
+# --- MODIFIED FUNCTION ---
 @st.cache_resource
-def load_credentials():
+def load_credentials(selected_account: str):
+    """Loads credentials for the specified account from .env file."""
+    account_prefix = selected_account.upper() + "_"
+    
     creds = {
-        'lwa_app_id': os.getenv('SPAPI_CLIENT_ID'),
-        'lwa_client_secret': os.getenv('SPAPI_CLIENT_SECRET'),
-        'aws_access_key': os.getenv('AWS_ACCESS_KEY_ID'),
-        'aws_secret_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
+        'lwa_app_id': os.getenv(f"{account_prefix}SPAPI_CLIENT_ID"),
+        'lwa_client_secret': os.getenv(f"{account_prefix}SPAPI_CLIENT_SECRET"),
+        'aws_access_key': os.getenv(f"{account_prefix}AWS_ACCESS_KEY_ID"),
+        'aws_secret_key': os.getenv(f"{account_prefix}AWS_SECRET_ACCESS_KEY"),
         'refresh_tokens': {
-            'na': os.getenv('SPAPI_REFRESH_TOKEN_NA'),
-            'eu': os.getenv('SPAPI_REFRESH_TOKEN_EU'),
-            'fe': os.getenv('SPAPI_REFRESH_TOKEN_FE'),
+            'na': os.getenv(f"{account_prefix}SPAPI_REFRESH_TOKEN_NA"),
+            'eu': os.getenv(f"{account_prefix}SPAPI_REFRESH_TOKEN_EU"),
+            'fe': os.getenv(f"{account_prefix}SPAPI_REFRESH_TOKEN_FE"),
         }
     }
     if not all([creds['lwa_app_id'], creds['lwa_client_secret'], creds['aws_access_key'], creds['aws_secret_key']]):
-        st.error("Missing one or more core SP-API credentials in your .env file.")
+        st.error(f"Missing one or more core SP-API credentials for the '{selected_account}' account in your .env file.")
         st.stop()
     if not any(creds['refresh_tokens'].values()):
-        st.error("No refresh tokens found. Please add regional refresh tokens to your .env file.")
+        st.error(f"No refresh tokens found for the '{selected_account}' account. Please add regional refresh tokens to your .env file.")
         st.stop()
     return creds
 
@@ -87,7 +91,7 @@ def get_amazon_report(marketplace_id_string: str, credentials: dict, report_type
     refresh_token_for_region = credentials['refresh_tokens'].get(region_code)
 
     if not refresh_token_for_region:
-        st.error(f"Refresh token for region '{region_code.upper()}' not found. Please set `SPAPI_REFRESH_TOKEN_{region_code.upper()}` in your .env file.")
+        st.error(f"Refresh token for region '{region_code.upper()}' not found. Please set `..._SPAPI_REFRESH_TOKEN_{region_code.upper()}` in your .env file.")
         return None
 
     try:
@@ -124,8 +128,8 @@ def get_amazon_report(marketplace_id_string: str, credentials: dict, report_type
                 st.json(get_report_response.payload)
                 return None
         else: # This else belongs to the for loop, runs if loop finishes without break
-             st.warning("Report did not complete in time.")
-             return None
+            st.warning("Report did not complete in time.")
+            return None
 
         get_report_doc_response = reports_client.get_report_document(reportDocumentId=report_document_id)
         download_url = get_report_doc_response.payload.get('url')
@@ -181,23 +185,33 @@ def login_form():
 
 def main_app():
     st.title("📦 Amazon SP-API Dynamic Report Generator")
-    st.markdown("Select a marketplace and a report type, then click **Generate Report**.")
-
-    spapi_credentials = load_credentials()
+    st.markdown("Select an account, marketplace, and report type, then click **Generate Report**.")
 
     with st.container(border=True):
-        col1, col2 = st.columns(2)
+        # --- MODIFIED UI ---
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            selected_account = st.selectbox(
+                "Select Account:",
+                options=["Frienemy", "Aport"],
+                help="Choose the seller account to use."
+            )
+        
+        # Load credentials based on the selected account
+        spapi_credentials = load_credentials(selected_account)
+
         marketplace_options = {f"{m.name} ({m.marketplace_id})": m.marketplace_id for m in Marketplaces}
         sorted_marketplace_options_keys = sorted(marketplace_options.keys())
         default_marketplace_index = sorted_marketplace_options_keys.index(f"US ({Marketplaces.US.marketplace_id})") if f"US ({Marketplaces.US.marketplace_id})" in sorted_marketplace_options_keys else 0
 
-        with col1:
+        with col2:
             selected_marketplace_display = st.selectbox(
                 "Select Marketplace:",
                 options=sorted_marketplace_options_keys,
                 index=default_marketplace_index
             )
-        with col2:
+        with col3:
             selected_report_display_name = st.selectbox(
                 "Select Report Type:",
                 options=list(REPORT_TYPES_MAP.keys())
@@ -208,7 +222,7 @@ def main_app():
 
     if st.button("Generate Report", use_container_width=True, type="primary"):
         if spapi_credentials:
-            with st.status(f"Generating '{selected_report_display_name}' for {selected_marketplace_display}...", expanded=True) as status:
+            with st.status(f"Generating '{selected_report_display_name}' for {selected_marketplace_display} on account '{selected_account}'...", expanded=True) as status:
                 df_report = get_amazon_report(selected_marketplace_id, spapi_credentials, selected_report_api_name)
                 st.session_state['current_report_df'] = df_report
                 st.session_state['current_report_name'] = selected_report_display_name
@@ -240,22 +254,31 @@ def main_app():
         st.info("Report generation was attempted but failed or was cancelled. Check messages above for details.")
     
     st.markdown("---")
+    # --- MODIFIED .ENV EXAMPLE ---
     with st.expander("Show .env Configuration Example"):
-        st.markdown("Please ensure your `.env` file is configured with your regional refresh tokens and a password.")
+        st.markdown("Please ensure your `.env` file is configured with your regional refresh tokens, credentials for each account, and a password.")
         st.code("""
-# Example .env file
+# Example .env file for Multiple Accounts
 
-SPAPI_CLIENT_ID="amzn1.application-oa2-client.xxxxxxxx"
-SPAPI_CLIENT_SECRET="xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-AWS_ACCESS_KEY_ID="YOUR_AWS_ACCESS_KEY_ID"
-AWS_SECRET_ACCESS_KEY="YOUR_AWS_SECRET_ACCESS_KEY"
+# --- Frienemy Account Credentials ---
+FRIENEMY_SPAPI_CLIENT_ID="amzn1.application-oa2-client.xxxxxxxx_frienemy_xxxx"
+FRIENEMY_SPAPI_CLIENT_SECRET="xxxxxxxx_frienemy_secret_xxxxxxxx"
+FRIENEMY_AWS_ACCESS_KEY_ID="YOUR_FRIENEMY_AWS_ACCESS_KEY_ID"
+FRIENEMY_AWS_SECRET_ACCESS_KEY="YOUR_FRIENEMY_AWS_SECRET_KEY"
+FRIENEMY_SPAPI_REFRESH_TOKEN_NA="Atzr|FRIENEMY_NORTH_AMERICA_REFRESH_TOKEN"
+FRIENEMY_SPAPI_REFRESH_TOKEN_EU="Atzr|FRIENEMY_EUROPE_REFRESH_TOKEN"
+FRIENEMY_SPAPI_REFRESH_TOKEN_FE="Atzr|FRIENEMY_FAR_EAST_REFRESH_TOKEN"
 
-# Add refresh tokens for each region you sell in
-SPAPI_REFRESH_TOKEN_NA="Atzr|YOUR_NORTH_AMERICA_REFRESH_TOKEN"
-SPAPI_REFRESH_TOKEN_EU="Atzr|YOUR_EUROPE_REFRESH_TOKEN"
-# SPAPI_REFRESH_TOKEN_FE="Atzr|YOUR_FAR_EAST_REFRESH_TOKEN" # Optional
+# --- Aport Account Credentials ---
+APORT_SPAPI_CLIENT_ID="amzn1.application-oa2-client.xxxxxxxx_aport_xxxx"
+APORT_SPAPI_CLIENT_SECRET="xxxxxxxx_aport_secret_xxxxxxxx"
+APORT_AWS_ACCESS_KEY_ID="YOUR_APORT_AWS_ACCESS_KEY_ID"
+APORT_AWS_SECRET_ACCESS_KEY="YOUR_APORT_AWS_SECRET_KEY"
+APORT_SPAPI_REFRESH_TOKEN_NA="Atzr|APORT_NORTH_AMERICA_REFRESH_TOKEN"
+APORT_SPAPI_REFRESH_TOKEN_EU="Atzr|APORT_EUROPE_REFRESH_TOKEN"
+APORT_SPAPI_REFRESH_TOKEN_FE="Atzr|APORT_FAR_EAST_REFRESH_TOKEN"
 
-# Add a password to protect the app
+# --- App Password (Shared) ---
 Password="your_secure_password"
 """)
 
