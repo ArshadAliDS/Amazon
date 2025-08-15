@@ -20,6 +20,8 @@ st.set_page_config(
 # --- Load Environment Variables ---
 # This loads the credentials from your .env file.
 load_dotenv()
+APP_PASSWORD = os.getenv("Password")
+
 
 # --- Detailed Marketplace Mappings ---
 MARKETPLACE_DETAILS_MAP = {
@@ -99,7 +101,7 @@ def process_financial_events(financial_events_payload):
     """
     Parses the JSON payload from the Finances API and calculates the required financial columns.
     """
-    # st.info("Parsing financial events and calculating totals...")
+    st.info("Parsing financial events and calculating totals...")
     processed_records = []
     
     shipment_events = financial_events_payload.get('FinancialEvents', {}).get('ShipmentEventList', [])
@@ -165,13 +167,13 @@ def convert_df_to_inr(df, rates):
     df['rate'] = df['currency'].map(rates).fillna(1.0)
     df['Total Revenue (INR)'] = df['Total Revenue'] * df['rate']
     df['Net Proceeds (INR)'] = df['Net Proceeds'] * df['rate']
-    df['Amazon Fees (INR)'] = abs(df['Amazon Fees'] * df['rate'])
+    df['Amazon Fees (INR)'] = df['Amazon Fees'] * df['rate']
     
     # Also convert expense columns if they exist
     if 'Expenses' in df.columns:
-        df['Expenses (INR)'] = df['Expenses']
+        df['Expenses (INR)'] = df['Expenses'] * df['rate']
     if 'Courier Charges' in df.columns:
-        df['Courier Charges (INR)'] = df['Courier Charges']
+        df['Courier Charges (INR)'] = df['Courier Charges'] * df['rate']
     
     df.drop(columns=['rate'], inplace=True) # Drop the helper rate column
     
@@ -198,7 +200,7 @@ def fetch_financial_data_chunk(start_date, end_date, region, account_name, statu
         
         with st.spinner(f"Fetching financial events for {region.upper()}..."):
             while True:
-                # st.info(f"Fetching page of events from {start_date}...")
+                st.info(f"Fetching page of events from {start_date}...")
                 response = finances_api.list_financial_events(
                     PostedAfter=pd.to_datetime(start_date).isoformat(),
                     PostedBefore=pd.to_datetime(end_date).isoformat(),
@@ -211,10 +213,10 @@ def fetch_financial_data_chunk(start_date, end_date, region, account_name, statu
                 
                 next_token = response.payload.get('FinancialEvents', {}).get('NextToken')
                 if not next_token:
-                    # st.success("All pages for this chunk have been processed.")
+                    st.success("All pages for this chunk have been processed.")
                     break
                 
-                # st.info("More events available, fetching next page...")
+                st.info("More events available, fetching next page...")
                 time.sleep(2)
 
     except Exception as e:
@@ -230,7 +232,7 @@ def fetch_financial_data_in_chunks(start_date, end_date, account_name, status_pl
     all_data_df = pd.DataFrame()
     
     regions_to_process = ["na", "eu"]
-    # st.info(f"Will process data for the following regions: {regions_to_process}")
+    st.info(f"Will process data for the following regions: {regions_to_process}")
 
     for region in regions_to_process:
         st.markdown(f"--- \n### Processing Region: {region.upper()} for account: {account_name.title()}")
@@ -250,7 +252,7 @@ def fetch_financial_data_in_chunks(start_date, end_date, account_name, status_pl
             current_start_date = chunk_end_date + timedelta(days=1)
             
             if current_start_date <= end_date:
-                # st.info("--- Pausing for 5 seconds to respect API rate limits... ---")
+                st.info("--- Pausing for 5 seconds to respect API rate limits... ---")
                 time.sleep(5)
             
     return all_data_df
@@ -281,14 +283,13 @@ def build_dashboard(df):
 
     # --- KPIs ---
     total_revenue_inr = filtered_df['Total Revenue (INR)'].sum()
-    total_fees_inr = abs(filtered_df['Amazon Fees (INR)'].sum())
+    total_fees_inr = filtered_df['Amazon Fees (INR)'].sum()
     
-    # **FIX:** Safely calculate total expenses
     expenses_sum = filtered_df['Expenses (INR)'].sum() if 'Expenses (INR)' in filtered_df.columns else 0
     courier_sum = filtered_df['Courier Charges (INR)'].sum() if 'Courier Charges (INR)' in filtered_df.columns else 0
     total_expenses_inr = expenses_sum + courier_sum
     
-    total_net_inr = total_revenue_inr - total_fees_inr - total_expenses_inr # Fees are negative
+    total_net_inr = total_revenue_inr + total_fees_inr - total_expenses_inr # Fees are negative
     unique_orders = filtered_df['amazon-order-id'].nunique()
 
     st.subheader("Performance Overview")
@@ -346,89 +347,105 @@ def build_dashboard(df):
     with st.expander("View Processed Data"):
         st.dataframe(filtered_df)
 
-# --- Streamlit UI ---
-
-st.title("💰 Amazon SP-API Financial Dashboard")
-st.markdown("""
-This application connects to your Amazon Seller Central account using the **Finances API** to download and visualize a detailed breakdown of your order transactions. All financial values are converted to INR.
-""")
-st.markdown("---")
-
-# --- Sidebar for Inputs ---
-with st.sidebar:
-    st.header("⚙️ Extraction Parameters")
-    
-    account_name = st.selectbox(
-        "Select Account",
-        ("Frienemy", "Aport")
-    )
-    
-    today = date.today()
-    date_range = st.date_input(
-        "Select Date Range",
-        value=(today - timedelta(days=30), today),
-        max_value=today
-    )
-    
-    st.header("Optional Expenses")
-    expense_file = st.file_uploader(
-        "Upload Courier Charges & Expenses (CSV/Excel)",
-        type=['csv', 'xlsx']
-    )
-    
-    process_button = st.button("🚀 Extract & Display Data", type="primary", use_container_width=True)
-
-# --- Main Panel for Output ---
-status_placeholder = st.container()
-
-if process_button:
-    if len(date_range) != 2:
-        st.warning("Please select both a start and end date.")
-    else:
-        start_date, end_date = date_range
-        if start_date > end_date:
-            st.error("Error: The start date cannot be after the end date.")
-        else:
-            financial_df = fetch_financial_data_in_chunks(start_date, end_date, account_name, status_placeholder)
-            
-            if financial_df is not None and not financial_df.empty:
-                # Merge optional expense data
-                if expense_file:
-                    st.info("Processing uploaded expense file...")
-                    try:
-                        if expense_file.name.endswith('.csv'):
-                            expense_df = pd.read_csv(expense_file)
-                        else:
-                            expense_df = pd.read_excel(expense_file)
-                        # st.info(expense_df)
-                        # Ensure required columns exist
-                        required_cols = ['amazon-order-id', 'Expenses', 'Courier Charges']
-                        if all(col in expense_df.columns for col in required_cols):
-                            financial_df = pd.merge(financial_df, expense_df[required_cols], on='amazon-order-id', how='left')
-                            financial_df[['Expenses', 'Courier Charges']] = financial_df[['Expenses', 'Courier Charges']].fillna(0)
-                            st.success("Successfully merged expense data.")
-                        else:
-                            st.error(f"Expense file must contain the columns: {', '.join(required_cols)}")
-                    except Exception as e:
-                        st.error(f"Error processing expense file: {e}")
-                
-                unique_currencies = financial_df['currency'].unique().tolist()
-                rates = get_dynamic_conversion_rates(unique_currencies, target_currency="INR")
-                
-                converted_df = convert_df_to_inr(financial_df, rates)
-                
-                try:
-                    converted_df['purchase-date'] = pd.to_datetime(converted_df['purchase-date']).dt.strftime('%d-%b-%y')
-                except Exception as e:
-                    st.warning(f"Could not format 'purchase-date': {e}")
-                
-                st.session_state.financial_df = converted_df
+def login_page():
+    st.title("🔐 Dashboard Login")
+    with st.form("login_form"):
+        password = st.text_input("Password", type="password")
+        if st.form_submit_button("Login"):
+            if password == APP_PASSWORD:
+                st.session_state['authenticated'] = True
+                st.rerun()
             else:
-                st.error("Operation complete, but no financial data was loaded. Please check the logs above for errors.")
-                st.session_state.financial_df = None
+                st.error("Incorrect password.")
 
-# --- Dashboard Display ---
-if 'financial_df' in st.session_state and st.session_state.financial_df is not None:
-    build_dashboard(st.session_state.financial_df)
-elif not process_button:
-    st.info("Select an account and a date range, then click 'Extract & Display Data' to begin.")
+def main_dashboard():
+    st.title("💰 Amazon SP-API Financial Dashboard")
+    st.markdown("""
+    This application connects to your Amazon Seller Central account using the **Finances API** to download and visualize a detailed breakdown of your order transactions. All financial values are converted to INR.
+    """)
+    st.markdown("---")
+
+    # --- Sidebar for Inputs ---
+    with st.sidebar:
+        st.header("⚙️ Extraction Parameters")
+        
+        account_name = st.selectbox(
+            "Select Account",
+            ("Frienemy", "Aport")
+        )
+        
+        today = date.today()
+        date_range = st.date_input(
+            "Select Date Range",
+            value=(today - timedelta(days=30), today),
+            max_value=today
+        )
+        
+        st.header("Optional Expenses")
+        expense_file = st.file_uploader(
+            "Upload Courier Charges & Expenses (CSV/Excel)",
+            type=['csv', 'xlsx']
+        )
+        
+        process_button = st.button("🚀 Extract & Display Data", type="primary", use_container_width=True)
+
+    # --- Main Panel for Output ---
+    status_placeholder = st.container()
+
+    if process_button:
+        if len(date_range) != 2:
+            st.warning("Please select both a start and end date.")
+        else:
+            start_date, end_date = date_range
+            if start_date > end_date:
+                st.error("Error: The start date cannot be after the end date.")
+            else:
+                financial_df = fetch_financial_data_in_chunks(start_date, end_date, account_name, status_placeholder)
+                
+                if financial_df is not None and not financial_df.empty:
+                    if expense_file:
+                        st.info("Processing uploaded expense file...")
+                        try:
+                            expense_df = pd.read_csv(expense_file) if expense_file.name.endswith('.csv') else pd.read_excel(expense_file)
+                            required_cols = ['amazon-order-id', 'Expenses', 'Courier Charges']
+                            if all(col in expense_df.columns for col in required_cols):
+                                financial_df = pd.merge(financial_df, expense_df[required_cols], on='amazon-order-id', how='left')
+                                financial_df[['Expenses', 'Courier Charges']] = financial_df[['Expenses', 'Courier Charges']].fillna(0)
+                                st.success("Successfully merged expense data.")
+                            else:
+                                st.error(f"Expense file must contain the columns: {', '.join(required_cols)}")
+                        except Exception as e:
+                            st.error(f"Error processing expense file: {e}")
+                    
+                    unique_currencies = financial_df['currency'].unique().tolist()
+                    rates = get_dynamic_conversion_rates(unique_currencies, target_currency="INR")
+                    
+                    converted_df = convert_df_to_inr(financial_df, rates)
+                    
+                    try:
+                        converted_df['purchase-date'] = pd.to_datetime(converted_df['purchase-date']).dt.strftime('%d-%b-%y')
+                    except Exception as e:
+                        st.warning(f"Could not format 'purchase-date': {e}")
+                    
+                    st.session_state.financial_df = converted_df
+                else:
+                    st.error("Operation complete, but no financial data was loaded. Please check the logs above for errors.")
+                    st.session_state.financial_df = None
+
+    # --- Dashboard Display ---
+    if 'financial_df' in st.session_state and st.session_state.financial_df is not None:
+        build_dashboard(st.session_state.financial_df)
+    elif not process_button:
+        st.info("Select an account and a date range, then click 'Extract & Display Data' to begin.")
+
+# --- Main App Logic ---
+if 'authenticated' not in st.session_state:
+    st.session_state['authenticated'] = False
+
+if not APP_PASSWORD:
+    st.error("FATAL: 'Password' is not set in the .env file. Application cannot start.")
+else:
+    if st.session_state['authenticated']:
+        main_dashboard()
+    else:
+        login_page()
